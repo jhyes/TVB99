@@ -638,7 +638,7 @@ public class PlayFragment extends BaseLazyFragment {
                 lines[i] = "";
             }
         }
-        return StringUtils.join(lines, linesplit);
+        return String.join(linesplit, lines);
     }
 
     void playUrl(String url, HashMap<String, String> headers) {
@@ -1042,7 +1042,7 @@ public class PlayFragment extends BaseLazyFragment {
         }
         stopLoadWebView(true);
         stopParse();
-        Thunder.stop(); // 停止磁力下载
+        Thunder.stop(true); // 停止磁力下载
     }
 
     private VodInfo mVodInfo;

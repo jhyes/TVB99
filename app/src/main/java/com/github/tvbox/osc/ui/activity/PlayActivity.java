@@ -641,7 +641,7 @@ public class PlayActivity extends BaseActivity {
                 lines[i] = "";
             }
         }
-        return StringUtils.join(lines, linesplit);
+        return String.join(linesplit, lines);
     }
 
     void playUrl(String url, HashMap<String, String> headers) {
@@ -1147,7 +1147,7 @@ public class PlayActivity extends BaseActivity {
         }
         stopLoadWebView(true);
         stopParse();
-        Thunder.stopCurrentTask(); // 停止磁力下载
+        Thunder.stop(false); // 停止磁力下载
     }
 
     private VodInfo mVodInfo;

@@ -14,7 +14,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
 import android.text.TextUtils;
-import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -29,7 +28,6 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
-import android.webkit.WebViewClient;
 import android.widget.ImageView;
 import android.widget.ProgressBar;
 import android.widget.TextView;
@@ -73,6 +71,7 @@ import com.github.tvbox.osc.util.DefaultConfig;
 import com.github.tvbox.osc.util.HawkConfig;
 import com.github.tvbox.osc.util.LOG;
 import com.github.tvbox.osc.util.MD5;
+import com.github.tvbox.osc.util.OkGoHelper;
 import com.github.tvbox.osc.util.PlayerHelper;
 import com.github.tvbox.osc.util.VideoParseRuler;
 import com.github.tvbox.osc.util.XWalkUtils;
@@ -105,7 +104,6 @@ import org.xwalk.core.XWalkWebResourceResponse;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
-import java.io.IOException;
 import java.net.URLEncoder;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -1831,6 +1829,9 @@ public class PlayFragment extends BaseLazyFragment {
                 return null;
             try {
                 Request.Builder requestBuilder = new Request.Builder().url(url);
+                for (Map.Entry<String, String> entrySet : request.getHeaders().entrySet()) {
+                    requestBuilder.addHeader(entrySet.getKey(), entrySet.getValue());
+                }
                 if ("POST".equals(request.getMethod())) {
                     String encType = request.getEnctype();
                     if (encType == null) encType = "application/x-www-form-urlencoded";
@@ -1840,9 +1841,13 @@ public class PlayFragment extends BaseLazyFragment {
                 clientBuilder.readTimeout(10000, TimeUnit.MILLISECONDS);
                 clientBuilder.writeTimeout(10000, TimeUnit.MILLISECONDS);
                 clientBuilder.connectTimeout(10000, TimeUnit.MILLISECONDS);
+                clientBuilder.followRedirects(false);
+                clientBuilder.followSslRedirects(false);
                 okhttp3.Response response = clientBuilder.build().newCall(requestBuilder.build()).execute();
 
                 final String contentTypeValue = response.header("Content-Type");
+                String responsePhase = OkGoHelper.httpPhaseMap.get(response.code());
+                if (responsePhase == null) responsePhase = "Internal Server Error";
                 if (contentTypeValue != null) {
                     if (contentTypeValue.indexOf("charset=") > 0) {
                         final String[] contentTypeAndEncoding = contentTypeValue.replace(" ","").split(";");
@@ -1853,9 +1858,9 @@ public class PlayFragment extends BaseLazyFragment {
                             if (csArray.length >= 2)
                                 charset = csArray[1];
                         }
-                        return new WebResourceResponse(contentType, charset, response.body().byteStream());
+                        return new WebResourceResponse(contentType, charset, response.code(), responsePhase, request.getHeaders(), response.body().byteStream());
                     } else {
-                        return new WebResourceResponse(contentTypeValue, null, response.body().byteStream());
+                        return new WebResourceResponse(contentTypeValue, null, response.code(), responsePhase, request.getHeaders(), response.body().byteStream());
                     }
                 } else {
                     String guessMimeType = "application/octet-stream";
@@ -1870,9 +1875,9 @@ public class PlayFragment extends BaseLazyFragment {
                     } else if (url.endsWith(".jpg") || url.endsWith(".jpeg")) {
                         guessMimeType = "image/jpeg";
                     }
-                    return new WebResourceResponse(guessMimeType, null, response.body().byteStream());
+                    return new WebResourceResponse(guessMimeType, null, response.code(), responsePhase, request.getHeaders(), response.body().byteStream());
                 }
-            } catch (IOException e) {
+            } catch (Exception e) {
                 e.printStackTrace();
             }
             return null;

@@ -6,10 +6,8 @@ import android.app.Activity;
 import android.app.PendingIntent;
 import android.app.PictureInPictureParams;
 import android.app.RemoteAction;
-import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.drawable.Icon;
@@ -36,6 +34,7 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.widget.ImageView;
 import android.widget.ProgressBar;
 import android.widget.TextView;
@@ -50,8 +49,6 @@ import androidx.media3.common.Player;
 import androidx.media3.common.text.Cue;
 import androidx.recyclerview.widget.DiffUtil;
 
-import com.acsbendi.requestinspectorwebview.RequestInspectorWebViewClient;
-import com.acsbendi.requestinspectorwebview.WebViewRequest;
 import com.github.catvod.crawler.Spider;
 import com.github.tvbox.osc.R;
 import com.github.tvbox.osc.api.ApiConfig;
@@ -72,6 +69,7 @@ import com.github.tvbox.osc.player.controller.VodController;
 import com.github.tvbox.osc.player.thirdparty.Kodi;
 import com.github.tvbox.osc.player.thirdparty.MXPlayer;
 import com.github.tvbox.osc.player.thirdparty.ReexPlayer;
+import com.github.tvbox.osc.server.ControlManager;
 import com.github.tvbox.osc.server.RemoteServer;
 import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter;
 import com.github.tvbox.osc.ui.dialog.SearchSubtitleDialog;
@@ -124,15 +122,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import me.jessyan.autosize.AutoSize;
 import okhttp3.Cache;
-import okhttp3.MediaType;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.RequestBody;
+
 import tv.danmaku.ijk.media.player.IMediaPlayer;
 import tv.danmaku.ijk.media.player.IjkTimedText;
 import xyz.doikki.videoplayer.player.AbstractPlayer;
@@ -145,12 +139,7 @@ public class PlayActivity extends BaseActivity {
     private ProgressBar mPlayLoading;
     private VodController mController;
     private SourceViewModel sourceViewModel;
-    private Handler mHandler;
-
-    private BroadcastReceiver pipActionReceiver;
-    private static final int PIP_BOARDCAST_ACTION_PREV = 0;
-    private static final int PIP_BOARDCAST_ACTION_PLAYPAUSE = 1;
-    private static final int PIP_BOARDCAST_ACTION_NEXT = 2;
+    private Handler mHandler;  
 
     private String videoURL;
 
@@ -806,17 +795,19 @@ public class PlayActivity extends BaseActivity {
                     }
                 });
     }
-
+    
+    private boolean extPlay = false;
 
     void startPlayUrl(String url, HashMap<String, String> headers) {
+        final String finalUrl = url;
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 stopParse();
                 if (mVideoView != null) {
                     mVideoView.release();
-                    if (url != null) {
-                        videoURL = url;
+                    if (finalUrl != null) {
+                        String url = finalUrl;              
                         try {
                             int playerType = mVodPlayerCfg.getInt("pl");
                             // takagen99: Check for External Player
@@ -850,7 +841,17 @@ public class PlayActivity extends BaseActivity {
                             e.printStackTrace();
                         }
                         hideTip();
-                        PlayerHelper.updateCfg(mVideoView, mVodPlayerCfg);
+                        if (url.startsWith("data:application/dash+xml;base64,")) {
+                            PlayerHelper.updateCfg(mVideoView, mVodPlayerCfg, 2);
+                            App.getInstance()
+                                .setDashData(url.split("base64,")[1]);
+                            url = ControlManager.get()
+                                .getAddress(true) + "dash/proxy.mpd";
+                        } else if (url.contains(".mpd") || url.contains("type=mpd")) {
+                            PlayerHelper.updateCfg(mVideoView, mVodPlayerCfg, 2);
+                        } else {
+                            PlayerHelper.updateCfg(mVideoView, mVodPlayerCfg);
+                        }                        
                         mVideoView.setProgressKey(progressKey);
                         if (headers != null) {
                             mVideoView.setUrl(url, headers);
@@ -923,57 +924,59 @@ public class PlayActivity extends BaseActivity {
 
     private void initViewModel() {
         sourceViewModel = new ViewModelProvider(this).get(SourceViewModel.class);
-        sourceViewModel.playResult.observe(this, new Observer<JSONObject>() {
-            @Override
-            public void onChanged(JSONObject info) {
-                if (info != null) {
-                    try {
-                        progressKey = info.optString("proKey", null);
-                        boolean parse = info.optString("parse", "1").equals("1");
-                        boolean jx = info.optString("jx", "0").equals("1");
-                        playSubtitle = info.optString("subt", /*"https://dash.akamaized.net/akamai/test/caption_test/ElephantsDream/ElephantsDream_en.vtt"*/"");
-                        subtitleCacheKey = info.optString("subtKey", null);
-                        String playUrl = info.optString("playUrl", "");
-                        String flag = info.optString("flag");
-                        String url = info.getString("url");
-                        HashMap<String, String> headers = null;
-                        webUserAgent = null;
-                        webHeaderMap = null;
-                        if (info.has("header")) {
-                            try {
-                                JSONObject hds = new JSONObject(info.getString("header"));
-                                Iterator<String> keys = hds.keys();
-                                while (keys.hasNext()) {
-                                    String key = keys.next();
-                                    if (headers == null) {
-                                        headers = new HashMap<>();
-                                    }
-                                    headers.put(key, hds.getString(key));
-                                    if (key.equalsIgnoreCase("user-agent")) {
-                                        webUserAgent = hds.getString(key).trim();
-                                    }
-                                }
-                                webHeaderMap = headers;
-                            } catch (Throwable th) {
+        sourceViewModel.playResult.observeForever(mObserverPlayResult);
+    }
 
+    private final Observer<JSONObject> mObserverPlayResult= new Observer<JSONObject>() {
+        @Override
+        public void onChanged(JSONObject info) {
+            if (info != null) {
+                try {
+                    progressKey = info.optString("proKey", null);
+                    boolean parse = info.optString("parse", "1").equals("1");
+                    boolean jx = info.optString("jx", "0").equals("1");
+                    playSubtitle = info.optString("subt", /*"https://dash.akamaized.net/akamai/test/caption_test/ElephantsDream/ElephantsDream_en.vtt"*/"");
+                    subtitleCacheKey = info.optString("subtKey", null);
+                    String playUrl = info.optString("playUrl", "");
+                    String flag = info.optString("flag");
+                    String url = info.getString("url");
+                    HashMap<String, String> headers = null;
+                    webUserAgent = null;
+                    webHeaderMap = null;
+                    if (info.has("header")) {
+                        try {
+                            JSONObject hds = new JSONObject(info.getString("header"));
+                            Iterator<String> keys = hds.keys();
+                            while (keys.hasNext()) {
+                                String key = keys.next();
+                                if (headers == null) {
+                                    headers = new HashMap<>();
+                                }
+                                headers.put(key, hds.getString(key));
+                                if (key.equalsIgnoreCase("user-agent")) {
+                                    webUserAgent = hds.getString(key).trim();
+                                }
                             }
+                            webHeaderMap = headers;
+                        } catch (Throwable th) {
+
                         }
-                        if (parse || jx) {
-                            boolean userJxList = (playUrl.isEmpty() && ApiConfig.get().getVipParseFlags().contains(flag)) || jx;
-                            initParse(flag, userJxList, playUrl, url);
-                        } else {
-                            mController.showParse(false);
-                            playUrl(playUrl + url, headers);
-                        }
-                    } catch (Throwable th) {
-                        errorWithRetry("获取播放信息错误", true);
                     }
-                } else {
+                    if (parse || jx) {
+                        boolean userJxList = (playUrl.isEmpty() && ApiConfig.get().getVipParseFlags().contains(flag)) || jx;
+                        initParse(flag, userJxList, playUrl, url);
+                    } else {
+                        mController.showParse(false);
+                        playUrl(playUrl + url, headers);
+                    }
+                } catch (Throwable th) {
                     errorWithRetry("获取播放信息错误", true);
                 }
+            } else {
+                errorWithRetry("获取播放信息错误", true);
             }
-        });
-    }
+        }        
+    };
 
     private void initData() {
         Intent intent = getIntent();
@@ -1050,38 +1053,6 @@ public class PlayActivity extends BaseActivity {
         mController.setPlayerConfig(mVodPlayerCfg);
     }
 
-    // takagen99 : Add check for external players not enter PIP
-    private boolean extPlay = false;
-    boolean PiPON = Hawk.get(HawkConfig.PIC_IN_PIC, false);
-
-    @Override
-    public void onUserLeaveHint() {
-        if (supportsPiPMode() && !extPlay && PiPON) {
-            // Calculate Video Resolution
-            int vWidth = mVideoView.getVideoSize()[0];
-            int vHeight = mVideoView.getVideoSize()[1];
-            Rational ratio = null;
-            if (vWidth != 0) {
-                if ((((double) vWidth) / ((double) vHeight)) > 2.39) {
-                    vHeight = (int) (((double) vWidth) / 2.35);
-                }
-                ratio = new Rational(vWidth, vHeight);
-            } else {
-                ratio = new Rational(16, 9);
-            }
-            List<RemoteAction> actions = new ArrayList<>();
-            actions.add(generateRemoteAction(android.R.drawable.ic_media_previous, PIP_BOARDCAST_ACTION_PREV, "Prev", "Play Previous"));
-            actions.add(generateRemoteAction(android.R.drawable.ic_media_play, PIP_BOARDCAST_ACTION_PLAYPAUSE, "Play/Pause", "Play or Pause"));
-            actions.add(generateRemoteAction(android.R.drawable.ic_media_next, PIP_BOARDCAST_ACTION_NEXT, "Next", "Play Next"));
-            PictureInPictureParams params = new PictureInPictureParams.Builder()
-                    .setAspectRatio(ratio)
-                    .setActions(actions).build();
-            enterPictureInPictureMode(params);
-            mController.hideBottom();
-        }
-        super.onUserLeaveHint();
-    }
-
     @Override
     public void onBackPressed() {
         if (mController.onBackPressed()) {
@@ -1122,72 +1093,13 @@ public class PlayActivity extends BaseActivity {
     @Override
     protected void onPause() {
         super.onPause();
-        if (mVideoView != null) {
-            if (supportsPiPMode()) {
-                if (isInPictureInPictureMode()) {
-                    // Continue playback
-                    mVideoView.resume();
-                } else {
-                    // Pause playback
-                    mVideoView.pause();
-                }
-            } else {
-                mVideoView.pause();
-            }
-        }
-    }
-
-    @RequiresApi(api = Build.VERSION_CODES.O)
-    private RemoteAction generateRemoteAction(int iconResId, int actionCode, String title, String desc) {
-
-        final PendingIntent intent =
-                PendingIntent.getBroadcast(
-                        PlayActivity.this,
-                        actionCode,
-                        new Intent("PIP_VOD_CONTROL").putExtra("action", actionCode),
-                        0);
-        final Icon icon = Icon.createWithResource(PlayActivity.this, iconResId);
-        return (new RemoteAction(icon, title, desc, intent));
-    }
-
-    // takagen99 : PIP fix to close video when close window
-    @Override
-    public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode) {
-        super.onPictureInPictureModeChanged(isInPictureInPictureMode);
-        if (supportsPiPMode() && isInPictureInPictureMode) {
-            pipActionReceiver = new BroadcastReceiver() {
-
-                @Override
-                public void onReceive(Context context, Intent intent) {
-                    if (intent == null || !intent.getAction().equals("PIP_VOD_CONTROL") || mController == null) {
-                        return;
-                    }
-
-                    int currentStatus = intent.getIntExtra("action", 1);
-                    if (currentStatus == PIP_BOARDCAST_ACTION_PREV) {
-                        playPrevious();
-                    } else if (currentStatus == PIP_BOARDCAST_ACTION_PLAYPAUSE) {
-                        mController.togglePlay();
-                    } else if (currentStatus == PIP_BOARDCAST_ACTION_NEXT) {
-                        playNext(false);
-                    }
-                }
-            };
-            registerReceiver(pipActionReceiver, new IntentFilter("PIP_VOD_CONTROL"));
-
-        } else {
-            // Closed playback
-            if (onStopCalled) {
-                mVideoView.release();
-            }
-            unregisterReceiver(pipActionReceiver);
-            pipActionReceiver = null;
-        }
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        //手动注销
+        sourceViewModel.playResult.removeObserver(mObserverPlayResult);
         if (mVideoView != null) {
             mVideoView.release();
             mVideoView = null;
@@ -1196,6 +1108,7 @@ public class PlayActivity extends BaseActivity {
         stopParse();
         Thunder.stop(false); // 停止磁力下载
         Jianpian.finish();//停止p2p下载
+        App.getInstance().setDashData(null);
     }
 
     private VodInfo mVodInfo;
@@ -1285,8 +1198,9 @@ public class PlayActivity extends BaseActivity {
     public void play(boolean reset) {
         VodInfo.VodSeries vs = mVodInfo.seriesMap.get(mVodInfo.playFlag).get(mVodInfo.playIndex);
         EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_REFRESH, mVodInfo.playIndex));
-        setTip("正在获取播放信息", true, false);
+        EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_REFRESH_NOTIFY, mVodInfo.name + "&&" + vs.name));
         String playTitleInfo = mVodInfo.name + " : " + vs.name;
+        setTip("正在获取播放信息", true, false);
         mController.setTitle(playTitleInfo);
 
         stopParse();
@@ -1316,15 +1230,9 @@ public class PlayActivity extends BaseActivity {
             playUrl(vs.url.replace("tvbox-drive://", ""), headers);
             return;
         }
-        if (Jianpian.isJpUrl(vs.url)) {//荐片地址特殊判断
-            String jp_url = vs.url;
-            mController.showParse(false);
-            if (vs.url.startsWith("tvbox-xg:")) {
-                jp_url = jp_url.replace("tvbox-xg://", "tvbox-xg:");
-                playUrl(Jianpian.JPUrlDec(jp_url.substring(9)), null);
-            } else {
-                playUrl(Jianpian.JPUrlDec(jp_url), null);
-            }
+        if (vs.url.startsWith("tvbox-xg:") && !TextUtils.isEmpty(vs.url.substring(9))) {
+            this.mController.showParse(false);
+            playUrl(Jianpian.JPUrlDec(vs.url.substring(9)), null);
             return;
         }
         if (Thunder.play(vs.url, new Thunder.ThunderCallback() {
@@ -1896,16 +1804,12 @@ public class PlayActivity extends BaseActivity {
                 return true;
             }
         });
-        mSysWebClient = new SysWebClient(mSysWebView);
+        mSysWebClient = new SysWebClient();
         webView.setWebViewClient(mSysWebClient);
         webView.setBackgroundColor(Color.BLACK);
     }
 
-    private class SysWebClient extends RequestInspectorWebViewClient {
-
-        public SysWebClient(@NonNull WebView webView) {
-            super(webView);
-        }
+    private class SysWebClient extends WebViewClient {
 
         @Override
         public void onReceivedSslError(WebView webView, SslErrorHandler sslErrorHandler, SslError sslError) {
@@ -1945,7 +1849,7 @@ public class PlayActivity extends BaseActivity {
             }
         }
 
-        WebResourceResponse checkIsVideo(String url, WebViewRequest request) {
+        WebResourceResponse checkIsVideo(String url, HashMap<String, String> headers) {
             if (url.endsWith("/favicon.ico")) {
                 if (url.startsWith("http://127.0.0.1")) {
                     return new WebResourceResponse("image/x-icon", "UTF-8", null);
@@ -1969,95 +1873,23 @@ public class PlayActivity extends BaseActivity {
 
             if (!ad) {
                 if (checkVideoFormat(url)) {
-                    HashMap<String, String> webHeaders = new HashMap<>();
-                    Map<String, String> hds = request.getHeaders();
-                    if (hds != null && hds.keySet().size() > 0) {
-                        for (String k : hds.keySet()) {
-                            if (k.equalsIgnoreCase("user-agent")
-                                    || k.equalsIgnoreCase("referer")
-                                    || k.equalsIgnoreCase("origin")) {
-                                webHeaders.put(k, " " + hds.get(k));
-                            }
-                        }
-                    }
-
                     loadFoundVideoUrls.add(url);
-                    loadFoundVideoUrlsHeader.put(url, webHeaders);
+                    loadFoundVideoUrlsHeader.put(url, headers);
                     LOG.i("loadFoundVideoUrl:" + url);
                     if (loadFoundCount.incrementAndGet() == 1) {
                         url = loadFoundVideoUrls.poll();
                         mHandler.removeMessages(100);
                         String cookie = CookieManager.getInstance().getCookie(url);
-                        if (!TextUtils.isEmpty(cookie))
-                            webHeaders.put("Cookie", " " + cookie);//携带cookie
-                        playUrl(url, webHeaders);
+                        if(!TextUtils.isEmpty(cookie))headers.put("Cookie", " " + cookie);//携带cookie
+                        playUrl(url, headers);
                         stopLoadWebView(false);
                     }
                 }
             }
-
-            if (ad || loadFoundCount.get() > 0) return AdBlocker.createEmptyResource();
-            yxdm(url, request.getHeaders());
-            if ("POST".equals(request.getMethod())) {
-                if (request.getBody().isEmpty())//得不到jquery.post内容，后面再看看第三方webview类有没有更新
-                    return null;
-            } else if (!"GET".equals(request.getMethod()))
-                return null;
-            try {
-                Request.Builder requestBuilder = new Request.Builder().url(url);
-                for (Map.Entry<String, String> entrySet : request.getHeaders().entrySet()) {
-                    requestBuilder.addHeader(entrySet.getKey(), entrySet.getValue());
-                }
-                if ("POST".equals(request.getMethod())) {
-                    String encType = request.getEnctype();
-                    if (encType == null) encType = "application/x-www-form-urlencoded";
-                    requestBuilder.post(RequestBody.create(MediaType.get(encType + "; charset=utf-8"), request.getBody()));
-                }
-                OkHttpClient.Builder clientBuilder = new OkHttpClient.Builder();
-                clientBuilder.readTimeout(10000, TimeUnit.MILLISECONDS);
-                clientBuilder.writeTimeout(10000, TimeUnit.MILLISECONDS);
-                clientBuilder.connectTimeout(10000, TimeUnit.MILLISECONDS);
-                clientBuilder.followRedirects(false);
-                clientBuilder.followSslRedirects(false);
-                clientBuilder.cache(new Cache(new File(App.getInstance().getCacheDir().getAbsolutePath(), "xiutancache"), 10 * 1024 * 1024));
-                okhttp3.Response response = clientBuilder.build().newCall(requestBuilder.build()).execute();
-
-                final String contentTypeValue = response.header("Content-Type");
-                String responsePhase = OkGoHelper.httpPhaseMap.get(response.code());
-                if (responsePhase == null) responsePhase = "Internal Server Error";
-                if (contentTypeValue != null) {
-                    if (contentTypeValue.indexOf("charset=") > 0) {
-                        final String[] contentTypeAndEncoding = contentTypeValue.replace(" ", "").split(";");
-                        final String contentType = contentTypeAndEncoding[0];
-                        String charset = null;
-                        if (contentTypeAndEncoding.length >= 2) {
-                            String[] csArray = contentTypeAndEncoding[1].split("=");
-                            if (csArray.length >= 2)
-                                charset = csArray[1];
-                        }
-                        return new WebResourceResponse(contentType, charset, response.code(), responsePhase, request.getHeaders(), response.body().byteStream());
-                    } else {
-                        return new WebResourceResponse(contentTypeValue, null, response.code(), responsePhase, request.getHeaders(), response.body().byteStream());
-                    }
-                } else {
-                    String guessMimeType = "application/octet-stream";
-                    if (url.contains(".htm")) {
-                        guessMimeType = "text/html";
-                    } else if (url.contains(".css")) {
-                        guessMimeType = "text/css";
-                    } else if (url.contains(".js")) {
-                        guessMimeType = "application/javascript";
-                    } else if (url.endsWith(".png")) {
-                        guessMimeType = "image/png";
-                    } else if (url.endsWith(".jpg") || url.endsWith(".jpeg")) {
-                        guessMimeType = "image/jpeg";
-                    }
-                    return new WebResourceResponse(guessMimeType, null, response.code(), responsePhase, request.getHeaders(), response.body().byteStream());
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-            return null;
+            
+            return ad || loadFoundCount.get() > 0 ?
+                    AdBlocker.createEmptyResource() :
+                    null;
         }
 
         @Nullable
@@ -2069,10 +1901,21 @@ public class PlayActivity extends BaseActivity {
         @Nullable
         @Override
         @TargetApi(Build.VERSION_CODES.LOLLIPOP)
-        public WebResourceResponse shouldInterceptRequest(WebView view, WebViewRequest request) {
-            String url = request.getUrl();
+        public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+            String url = request.getUrl().toString();
             LOG.i("shouldInterceptRequest url:" + url);
-            return checkIsVideo(url, request);
+            HashMap<String, String> webHeaders = new HashMap<>();
+            Map<String, String> hds = request.getRequestHeaders();
+            if (hds != null && hds.keySet().size() > 0) {
+                for (String k : hds.keySet()) {
+                    if (k.equalsIgnoreCase("user-agent")
+                            || k.equalsIgnoreCase("referer")
+                            || k.equalsIgnoreCase("origin")) {
+                        webHeaders.put(k," " + hds.get(k));
+                    }
+                }
+            }
+            return checkIsVideo(url, webHeaders);
         }
 
         @Override
